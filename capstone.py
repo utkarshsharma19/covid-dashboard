@@ -152,10 +152,10 @@ chart_type = st.sidebar.selectbox(
 # Rolling average
 smooth = st.sidebar.checkbox("7-day rolling average", value=True)
 
-# ── NEW: Per-capita toggle ────────────────────────────────────────────────────
+# Per-capita toggle
 per_capita = st.sidebar.checkbox("Per 100k population", value=False)
 
-# ── NEW: Log scale toggle ─────────────────────────────────────────────────────
+# Log scale toggle
 log_scale = st.sidebar.checkbox("Log scale (y-axis)", value=False)
 
 # ── Main content ──────────────────────────────────────────────────────────────
@@ -185,9 +185,11 @@ if per_capita:
         country = group["Country/Region"].iloc[0]
         pop = population.get(country, None)
         if pop and pop > 0:
-            group[col_name] = group[col_name] / pop * 100_000
+            group["Daily"] = group["Daily"] / pop * 100_000
+            group["Cumulative"] = group["Cumulative"] / pop * 100_000
         else:
-            group[col_name] = None
+            group["Daily"] = None
+            group["Cumulative"] = None
         return group
     df = df.groupby("Country/Region", group_keys=False).apply(normalise)
 
@@ -257,15 +259,18 @@ st.download_button(
 # ── Summary table ─────────────────────────────────────────────────────────────
 st.subheader("Summary Statistics")
 
+confirmed_max_date = data["Confirmed Cases"]["Date"].max()
+deaths_max_date = data["Deaths"]["Date"].max()
+
 summary_rows = []
 for country in selected_countries:
     confirmed_latest = data["Confirmed Cases"][
         (data["Confirmed Cases"]["Country/Region"] == country)
-        & (data["Confirmed Cases"]["Date"] == data["Confirmed Cases"]["Date"].max())
+        & (data["Confirmed Cases"]["Date"] == confirmed_max_date)
     ]["Cumulative"]
     deaths_latest = data["Deaths"][
         (data["Deaths"]["Country/Region"] == country)
-        & (data["Deaths"]["Date"] == data["Deaths"]["Date"].max())
+        & (data["Deaths"]["Date"] == deaths_max_date)
     ]["Cumulative"]
 
     if confirmed_latest.empty or deaths_latest.empty:
