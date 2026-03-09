@@ -23,6 +23,10 @@ BASE_URL = (
     "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/"
     "csse_covid_19_data/csse_covid_19_time_series/"
 )
+UID_URL = (
+    "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/"
+    "csse_covid_19_data/UID_ISO_FIPS_LookUp_Table.csv"
+)
 
 DATASETS = {
     "Confirmed Cases": "time_series_covid19_confirmed_global.csv",
@@ -57,6 +61,20 @@ def load_dataset(filename: str) -> pd.DataFrame:
     return df
 
 
+@st.cache_data(ttl=86400, show_spinner="Fetching population data…")
+def load_population() -> pd.Series:
+    """Return a Series of population keyed by Country/Region from JHU UID table."""
+    resp = requests.get(UID_URL, timeout=30)
+    resp.raise_for_status()
+    df = pd.read_csv(StringIO(resp.text))
+    # Keep only country-level rows (Province_State is NaN) and aggregate
+    country = df[df["Province_State"].isna()][["Country_Region", "Population"]]
+    # Some countries have multiple rows (e.g. UK overseas); sum them
+    pop = df.groupby("Country_Region")["Population"].sum()
+    pop.index.name = "Country/Region"
+    return pop
+
+
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_all_data() -> dict[str, pd.DataFrame]:
     return {label: load_dataset(fname) for label, fname in DATASETS.items()}
@@ -64,6 +82,7 @@ def get_all_data() -> dict[str, pd.DataFrame]:
 
 # ── Load data ─────────────────────────────────────────────────────────────────
 data = get_all_data()
+population = load_population()
 all_countries = sorted(data["Confirmed Cases"]["Country/Region"].unique())
 
 # ── Sidebar controls ──────────────────────────────────────────────────────────
@@ -135,6 +154,12 @@ chart_type = st.sidebar.selectbox(
 # Rolling average
 smooth = st.sidebar.checkbox("7-day rolling average", value=True)
 
+# ── NEW: Per-capita toggle ────────────────────────────────────────────────────
+per_capita = st.sidebar.checkbox("Per 100k population", value=False)
+
+# ── NEW: Log scale toggle ─────────────────────────────────────────────────────
+log_scale = st.sidebar.checkbox("Log scale (y-axis)", value=False)
+
 # ── Main content ──────────────────────────────────────────────────────────────
 st.title("🌍 COVID-19 Global Dashboard")
 st.markdown(
@@ -156,6 +181,20 @@ if smooth and count_type == "Daily New":
         .transform(lambda x: x.rolling(7, min_periods=1).mean())
     )
 
+# ── Apply per-capita normalisation ────────────────────────────────────────────
+if per_capita:
+    def normalise(group):
+        country = group["Country/Region"].iloc[0]
+        pop = population.get(country, None)
+        if pop and pop > 0:
+            group[col_name] = group[col_name] / pop * 100_000
+        else:
+            group[col_name] = None
+        return group
+    df = df.groupby("Country/Region", group_keys=False).apply(normalise)
+
+y_label_suffix = " per 100k population" if per_capita else ""
+
 # ── Chart ─────────────────────────────────────────────────────────────────────
 fig = go.Figure()
 
@@ -164,11 +203,16 @@ for country in selected_countries:
     if cdf.empty:
         continue
 
+    hover_fmt = ".2f" if per_capita else ",.0f"
     kwargs = dict(
         x=cdf["Date"],
         y=cdf[col_name],
         name=country,
-        hovertemplate=f"<b>{country}</b><br>%{{x|%b %d, %Y}}<br>{col_name}: %{{y:,.0f}}<extra></extra>",
+        hovertemplate=(
+            f"<b>{country}</b><br>%{{x|%b %d, %Y}}<br>"
+            f"{col_name}: %{{y:{hover_fmt}}}{' /100k' if per_capita else ''}"
+            "<extra></extra>"
+        ),
     )
 
     if chart_type == "Line":
@@ -180,49 +224,72 @@ for country in selected_countries:
 
 title_suffix = " (7-day avg)" if smooth and count_type == "Daily New" else ""
 fig.update_layout(
-    title=f"{count_type} {metric}{title_suffix}",
+    title=f"{count_type} {metric}{title_suffix}{y_label_suffix}",
     xaxis_title="Date",
-    yaxis_title="Count",
+    yaxis_title=f"Count{y_label_suffix}",
     hovermode="x unified",
     legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     height=520,
     template="plotly_white",
 )
-fig.update_yaxes(tickformat=",")
+fig.update_yaxes(
+    tickformat="," if not per_capita else ".1f",
+    type="log" if log_scale else "linear",
+)
 
 st.plotly_chart(fig, use_container_width=True)
+
+# ── NEW: Download CSV button ──────────────────────────────────────────────────
+csv_export = df[["Country/Region", "Date", "Cumulative", col_name]].copy()
+csv_export["Date"] = csv_export["Date"].dt.strftime("%Y-%m-%d")
+csv_export.columns = [
+    "Country",
+    "Date",
+    "Cumulative",
+    f"{'Daily' if count_type == 'Daily New' else 'Cumulative'}"
+    f"{'_per100k' if per_capita else ''}",
+]
+st.download_button(
+    label="⬇️ Download filtered data as CSV",
+    data=csv_export.to_csv(index=False),
+    file_name=f"covid_{metric.lower().replace(' ', '_')}_{start_date}_{end_date}.csv",
+    mime="text/csv",
+)
 
 # ── Summary table ─────────────────────────────────────────────────────────────
 st.subheader("Summary Statistics")
 
-latest_date = df["Date"].max()
 summary_rows = []
 for country in selected_countries:
-    cdf = df_full[df_full["Country/Region"] == country]
-    if cdf.empty:
+    confirmed_latest = data["Confirmed Cases"][
+        (data["Confirmed Cases"]["Country/Region"] == country)
+        & (data["Confirmed Cases"]["Date"] == data["Confirmed Cases"]["Date"].max())
+    ]["Cumulative"]
+    deaths_latest = data["Deaths"][
+        (data["Deaths"]["Country/Region"] == country)
+        & (data["Deaths"]["Date"] == data["Deaths"]["Date"].max())
+    ]["Cumulative"]
+
+    if confirmed_latest.empty or deaths_latest.empty:
         continue
-    latest = cdf[cdf["Date"] == cdf["Date"].max()].iloc[0]
-    summary_rows.append({
+
+    total_confirmed = int(confirmed_latest.values[0])
+    total_deaths = int(deaths_latest.values[0])
+    pop = population.get(country, None)
+
+    row = {
         "Country": country,
-        "Total Confirmed": int(
-            data["Confirmed Cases"][
-                (data["Confirmed Cases"]["Country/Region"] == country)
-                & (data["Confirmed Cases"]["Date"] == data["Confirmed Cases"]["Date"].max())
-            ]["Cumulative"].values[0]
-        ) if country in data["Confirmed Cases"]["Country/Region"].values else 0,
-        "Total Deaths": int(
-            data["Deaths"][
-                (data["Deaths"]["Country/Region"] == country)
-                & (data["Deaths"]["Date"] == data["Deaths"]["Date"].max())
-            ]["Cumulative"].values[0]
-        ) if country in data["Deaths"]["Country/Region"].values else 0,
-    })
+        "Total Confirmed": total_confirmed,
+        "Total Deaths": total_deaths,
+        "Case Fatality Rate": f"{total_deaths / total_confirmed * 100:.2f}%" if total_confirmed else "N/A",
+    }
+    if pop and pop > 0:
+        row["Confirmed per 100k"] = f"{total_confirmed / pop * 100_000:,.1f}"
+        row["Deaths per 100k"] = f"{total_deaths / pop * 100_000:,.1f}"
+    summary_rows.append(row)
 
 if summary_rows:
     summary_df = pd.DataFrame(summary_rows).set_index("Country")
-    summary_df["Case Fatality Rate"] = (
-        summary_df["Total Deaths"] / summary_df["Total Confirmed"] * 100
-    ).round(2).astype(str) + "%"
     summary_df["Total Confirmed"] = summary_df["Total Confirmed"].map("{:,}".format)
     summary_df["Total Deaths"] = summary_df["Total Deaths"].map("{:,}".format)
     st.dataframe(summary_df, use_container_width=True)
