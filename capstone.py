@@ -67,8 +67,6 @@ def load_population() -> pd.Series:
     resp = requests.get(UID_URL, timeout=30)
     resp.raise_for_status()
     df = pd.read_csv(StringIO(resp.text))
-    # Keep only country-level rows (Province_State is NaN) and aggregate
-    country = df[df["Province_State"].isna()][["Country_Region", "Population"]]
     # Some countries have multiple rows (e.g. UK overseas); sum them
     pop = df.groupby("Country_Region")["Population"].sum()
     pop.index.name = "Country/Region"
@@ -240,14 +238,14 @@ fig.update_yaxes(
 st.plotly_chart(fig, use_container_width=True)
 
 # ── NEW: Download CSV button ──────────────────────────────────────────────────
-csv_export = df[["Country/Region", "Date", "Cumulative", col_name]].copy()
+export_cols = ["Country/Region", "Date", "Cumulative", "Daily"]
+csv_export = df[export_cols].copy()
 csv_export["Date"] = csv_export["Date"].dt.strftime("%Y-%m-%d")
 csv_export.columns = [
     "Country",
     "Date",
-    "Cumulative",
-    f"{'Daily' if count_type == 'Daily New' else 'Cumulative'}"
-    f"{'_per100k' if per_capita else ''}",
+    f"Cumulative{'_per100k' if per_capita else ''}",
+    f"Daily{'_per100k' if per_capita else ''}",
 ]
 st.download_button(
     label="⬇️ Download filtered data as CSV",
