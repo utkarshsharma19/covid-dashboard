@@ -239,7 +239,7 @@ fig.update_yaxes(
 
 st.plotly_chart(fig, use_container_width=True)
 
-# ── NEW: Download CSV button ──────────────────────────────────────────────────
+# ── Download CSV button ───────────────────────────────────────────────────────
 export_cols = ["Country/Region", "Date", "Cumulative", "Daily"]
 csv_export = df[export_cols].copy()
 csv_export["Date"] = csv_export["Date"].dt.strftime("%Y-%m-%d")
